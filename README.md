@@ -99,8 +99,9 @@ The optional sidebar needs fullscreen TUI and at least **132 columns**. Step exe
 
 ## Important limits
 
-- **Plan is not a sandbox.** Built-in edit/write calls are restricted to the attached canonical plan file. Bash/powershell and other tools rely on read-only guidance in ordinary Plan mode—not comprehensive mutation enforcement.
-- **Build protects tracked plan files** from built-in edit/write changes. Completion is recorded separately; guarded step-instruction revisions remain supported.
+- **Plan is not a sandbox.** Path-bearing `edit`, `write`, `replace`, `insert`, and `undo_last_change` calls are restricted to the attached canonical plan file; recognized pathless editors are blocked because their target cannot be verified. Bash/powershell and unknown tools still rely on read-only guidance—not comprehensive mutation enforcement.
+- **Build protects tracked plan files** from recognized path-bearing editor calls. Opaque editors that resolve targets through private extension state cannot be preflighted without Pi capability metadata. Completion is recorded separately; guarded step-instruction revisions remain supported.
+- **Host tool choices are preserved.** Mode refreshes add only Plan Build’s own tools; they do not restore stale runtime removals or force-enable built-in editors replaced by another extension.
 - **Manual mid-run mode changes are deferred.** The composer shows the selected mode while the current run retains its effective permissions. Automatic per-mode model switching is deferred too.
 - **Approval checks freshness during the review dialog**, not ongoing implementation drift. Separate deployment/restart approvals still apply.
 - **Verification summaries are reports, not harness-certified proof.** Missing summaries do not mean checks passed.

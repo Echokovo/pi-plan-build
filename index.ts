@@ -78,8 +78,22 @@ const VALIDATION_NOTICE_ENTRY_TYPE = "pi-plan-build-validation-notice";
 const FRESH_ANNOUNCEMENT_MESSAGE_TYPE = "pi-plan-build-fresh-announcement";
 const PLAN_STEP_CHOICE = "Implement step by step";
 const MANAGED_TOOLS = new Set(["question", "plan_task", "plan_exit", "plan_step_control", "plan_step_complete", "plan_complete", "plan_finish"]);
-const MODE_ADDED_TOOLS = new Set([...MANAGED_TOOLS, "edit", "write"]);
+const FILE_MUTATION_TOOLS = new Set(["edit", "write", "replace", "insert", "undo_last_change"]);
+const SHELL_MUTATION_TOOLS = new Set(["bash", "powershell"]);
+const DEPENDENT_PLAN_TOOLS = new Set(["plan_complete", "plan_finish", "plan_step_control", "plan_step_complete", "plan_exit"]);
 const EMPTY_PARAMETERS = Type.Object({});
+
+function isFileMutationTool(toolName: string): boolean {
+	return FILE_MUTATION_TOOLS.has(toolName);
+}
+
+function isProjectMutationTool(toolName: string): boolean {
+	return isFileMutationTool(toolName) || SHELL_MUTATION_TOOLS.has(toolName);
+}
+
+function mutationPath(input: unknown): unknown {
+	return input && typeof input === "object" ? (input as { path?: unknown }).path : undefined;
+}
 
 
 function shorten(filePath: string, cwd: string): string {
@@ -251,15 +265,16 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 	}
 
 	function discoverUnmanagedTools(): void {
-		const additions = pi.getActiveTools().filter((name) => !MODE_ADDED_TOOLS.has(name) && !toolsBeforeModes.includes(name));
-		toolsBeforeModes = unique([...toolsBeforeModes, ...additions]);
+		// Plan Build owns only its lifecycle tools. Re-read the live host set so
+		// another extension's additions and removals both survive mode refreshes.
+		toolsBeforeModes = pi.getActiveTools().filter((name) => !MANAGED_TOOLS.has(name));
 	}
 
 	function applyTools(mode: Mode): void {
 		discoverUnmanagedTools();
 		const base = [...toolsBeforeModes];
 		if (mode === "plan") {
-			pi.setActiveTools(unique([...base, "edit", "write", "question", "plan_exit", "plan_task"]));
+			pi.setActiveTools(unique([...base, "question", "plan_exit", "plan_task"]));
 		} else {
 			pi.setActiveTools(unique([
 				...base,
@@ -1041,8 +1056,14 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 
 	pi.on("tool_result", (event, ctx) => {
 		if (event.isError && reconciliation) reconciliation.failed = true;
-		if (!event.isError && (event.toolName === "edit" || event.toolName === "write") && !plans.collection.records.some((r) => isAllowedPlanMutation(ctx.cwd, (event.input as { path?: unknown }).path, planPathFor(r.plan.sequence, ctx)))) armReconciliation(ctx);
-		if (!event.isError && (event.toolName === "write" || event.toolName === "edit") && isAllowedPlanMutation(ctx.cwd, (event.input as { path?: unknown }).path, currentPlanPath())) {
+		if (event.isError || !isFileMutationTool(event.toolName)) return;
+		const inputPath = mutationPath(event.input);
+		const targetsTrackedPlan = inputPath !== undefined && plans.collection.records.some((r) =>
+			isAllowedPlanMutation(ctx.cwd, inputPath, planPathFor(r.plan.sequence, ctx)));
+		// A pathless editor is opaque to Pi Plan Build, but a successful call is
+		// still enough evidence that ordinary Build work may need reconciliation.
+		if (!targetsTrackedPlan) armReconciliation(ctx);
+		if (inputPath === undefined || isAllowedPlanMutation(ctx.cwd, inputPath, currentPlanPath())) {
 			refreshSavedPlanTitle();
 			applyTools(runMode ?? selectedMode);
 			composer.update(ctx);
@@ -1051,34 +1072,36 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const effectiveMode = runMode ?? selectedMode;
-		if (plans.error && (MANAGED_TOOLS.has(event.toolName) && event.toolName !== "question" || ["edit", "write", "bash", "powershell"].includes(event.toolName))) return { block: true, reason: `Plan state unavailable: ${plans.error}. Restore usable state before mutations.` };
-		if (["edit", "write", "bash", "powershell", "plan_complete", "plan_finish", "plan_step_control", "plan_step_complete", "plan_exit"].includes(event.toolName)) {
+		if (plans.error && (MANAGED_TOOLS.has(event.toolName) && event.toolName !== "question" || isProjectMutationTool(event.toolName))) return { block: true, reason: `Plan state unavailable: ${plans.error}. Restore usable state before mutations.` };
+		if (isProjectMutationTool(event.toolName) || DEPENDENT_PLAN_TOOLS.has(event.toolName)) {
 			const latestAssistant = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant");
 			if (latestAssistant?.type === "message" && latestAssistant.message.role === "assistant" && latestAssistant.message.content.some((part) => part.type === "toolCall" && part.name === "plan_task" && !["list", "pause", "resume"].includes((part.arguments as { action?: string })?.action ?? ""))) {
 				return { block: true, reason: "Await plan_task in a separate tool batch before dependent edits, shell commands, or execution actions." };
 			}
 		}
-		if (effectiveMode === "build" && (event.toolName === "edit" || event.toolName === "write")) {
-			const inputPath = (event.input as { path?: unknown }).path;
-			if (isAllowedPlanMutation(ctx.cwd, inputPath, currentPlanPath()) || plans.collection.records.some((r) => isAllowedPlanMutation(ctx.cwd, inputPath, planPathFor(r.plan.sequence, ctx)))) {
+		if (effectiveMode === "build" && isFileMutationTool(event.toolName)) {
+			const inputPath = mutationPath(event.input);
+			if (inputPath !== undefined && (isAllowedPlanMutation(ctx.cwd, inputPath, currentPlanPath()) || plans.collection.records.some((r) => isAllowedPlanMutation(ctx.cwd, inputPath, planPathFor(r.plan.sequence, ctx))))) {
 				return {
 					block: true,
 					reason: "Current and historical plan files are read-only in Build mode. Do not add completion markers or otherwise update their steps; report completion through plan_step_complete during step execution or plan_complete after normal implementation and verification.",
 				};
 			}
 		}
-		if (effectiveMode === "build" && plans.execution && plans.execution.status !== "completed" && !executablePlanStep(plans.execution) && (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash" || event.toolName === "powershell")) {
+		if (effectiveMode === "build" && plans.execution && plans.execution.status !== "completed" && !executablePlanStep(plans.execution) && isProjectMutationTool(event.toolName)) {
 			return {
 				block: true,
 				reason: "Step-by-step execution is waiting for an explicit natural-language instruction from the user; no step is approved for project mutations.",
 			};
 		}
-		if (effectiveMode !== "plan" || (event.toolName !== "edit" && event.toolName !== "write")) return;
-		const inputPath = (event.input as { path?: unknown }).path;
-		if (plans.collection.attached !== null && isAllowedPlanMutation(ctx.cwd, inputPath, currentPlanPath())) return;
+		if (effectiveMode !== "plan" || !isFileMutationTool(event.toolName)) return;
+		const inputPath = mutationPath(event.input);
+		if (plans.collection.attached !== null && inputPath !== undefined && isAllowedPlanMutation(ctx.cwd, inputPath, currentPlanPath())) return;
 		return {
 			block: true,
-			reason: `Plan mode only permits edit/write access to the plan file: ${currentPlanPath()}`,
+			reason: inputPath === undefined
+				? `Plan mode cannot verify the target of ${event.toolName}; use a path-bearing editor for the plan file: ${currentPlanPath()}`
+				: `Plan mode only permits file-mutation access to the plan file: ${currentPlanPath()}`,
 		};
 	});
 
@@ -1216,9 +1239,9 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 		// Startup mode priority: session branch record > CLI flag (--plan / --build) > defaultMode setting > Build.
 		selectedMode = decoded?.selectedMode ?? flagMode ?? defaultMode ?? "build";
 		restoreUserMessageRails(ctx.sessionManager.getBranch());
-		toolsBeforeModes = Array.isArray(raw?.toolsBeforeModes)
-			? raw.toolsBeforeModes.filter((name): name is string => typeof name === "string" && !MANAGED_TOOLS.has(name))
-			: pi.getActiveTools().filter((name) => !MANAGED_TOOLS.has(name));
+		// Persisted snapshots describe an older runtime and must not override tool
+		// changes made by the host or another extension during this startup.
+		toolsBeforeModes = pi.getActiveTools().filter((name) => !MANAGED_TOOLS.has(name));
 		const plansDir = path.join(getAgentDir(), "plans");
 		restorePlanState(raw, ctx, event.reason === "fork" ? raw?.planSessionId : undefined);
 		runMode = undefined;

@@ -22,7 +22,7 @@ The agent establishes an action-led, single-action title and the scope once. Lat
 
 Questions, research, tangents, and related changes assume continuity. For a concrete independent deliverable, the agent asks whether to include it or finish/abandon the current plan before starting another. Discussion alone needs no lifecycle change; unanswered questions grant no consent. Boundary judgment is agent-assisted, not an automatic topic detector.
 
-Build edit/write guards protect every tracked current or historical plan file.
+Build path guards protect every tracked current or historical plan file from recognized editors when the call exposes its target. Anchor-only editors whose target remains private to another extension cannot be preflighted; see [Permission and verification limits](#permission-and-verification-limits).
 
 ## Approval and completion
 
@@ -93,9 +93,9 @@ See [UI internals](internals.md#presentation-and-ui-compatibility) for sidebar o
 
 ## Permission and verification limits
 
-Plan guidance allows only observation, analysis, discussion, and planning. Built-in edit/write calls may target **only the attached canonical plan path**, and only finalization or explicitly requested revision is appropriate. Other tools remain visible for exploration. Bash/powershell are not sandboxed in ordinary Plan mode: the read-only requirement is model guidance, not arbitrary shell classification.
+Plan guidance allows only observation, analysis, discussion, and planning. Recognized path-bearing editor calls (`edit`, `write`, `replace`, `insert`, and `undo_last_change`) may target **only the attached canonical plan path**, and only finalization or explicitly requested revision is appropriate. Recognized pathless editor calls are blocked because their target cannot be verified. Other tools remain visible for exploration. Bash/powershell are not sandboxed in ordinary Plan mode: the read-only requirement is model guidance, not arbitrary shell classification.
 
-Build keeps tracked Markdown read-only; completion belongs in extension state. Guarded revisions of unimplemented steps remain supported. See [Permission boundary](internals.md#permission-boundary) for path normalization, symlink handling, and enforcement limits.
+Build keeps tracked Markdown read-only when a recognized editor exposes its target; completion belongs in extension state. Pathless editors remain available for ordinary approved implementation, but Pi provides no mutation metadata or target resolver with which Plan Build could inspect another extension's private anchor state. Plan Build preserves the host's live editor selection rather than force-enabling built-in tools. Guarded revisions of unimplemented steps remain supported. See [Permission boundary](internals.md#permission-boundary) for path normalization, symlink handling, and enforcement limits.
 
 Plans include a brief `## Verification` section with standalone **Agent** and, only when essential, **User** labels. Use the smallest sufficient behavior check with repository-supported commands and expected observations; prose-only changes may use inspection. Build/type-check alone does not prove runtime behavior. Add checks only for a concrete risk, observed failure, or explicit requirement. Reuse passing results, disclose deferrals and blocked/unperformed checks, and stop after approved required checks pass. Do not downgrade essential user validation to finish. These are model instructions, not guaranteed test limits; repository/CI requirements still apply.
 

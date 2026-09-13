@@ -13,7 +13,7 @@ import { COMPLETION_GUIDANCE } from "./prompts.ts";
 import { createPlanExecution } from "./plan-execution.ts";
 import { decodePlanLifecycle, makePlanPath, PLAN_EXIT_APPROVE_CHOICE, PLAN_EXIT_FRESH_CHOICE, PLAN_EXIT_STAY_CHOICE, PLAN_ACTION_ANNOUNCEMENTS, planActionTone } from "./utils.ts";
 
-function harness(dir: string, entries: any[] = [], sessionId = "session") {
+function harness(dir: string, entries: any[] = [], sessionId = "session", initialActive = ["read", "write", "edit", "bash"]) {
 	process.env.PI_CODING_AGENT_DIR = dir;
 	const { handlers, on } = eventHandlers();
 	const commands = new Map<string, any>();
@@ -22,7 +22,7 @@ function harness(dir: string, entries: any[] = [], sessionId = "session") {
 	const messageRenderers = new Map<string, any>();
 	const flags = new Map<string, any>();
 	const flagValues = new Map<string, boolean>();
-	let active = ["read", "write", "edit", "bash"];
+	let active = [...initialActive];
 	let idle = true;
 	const events: any[] = [];
 	const pi = {
@@ -78,7 +78,7 @@ function harness(dir: string, entries: any[] = [], sessionId = "session") {
 	return {
 		ctx, pi, events, commands, tools, entryRenderers, messageRenderers, flags,
 		setFlag: (name: string, value: boolean) => { flagValues.set(name, value); },
-		entries, active: () => active, setIdle: (value: boolean) => { idle = value; },
+		entries, active: () => active, setActive: (next: string[]) => { active = [...next]; }, setIdle: (value: boolean) => { idle = value; },
 		event: emit,
 		prompt: async (text: string) => {
 			await emit("input", { source: "interactive", text });
@@ -880,6 +880,13 @@ test("completion reconciliation is one-shot and unfinished outcomes preserve the
 		assert.equal(h.events.filter((e) => e.kind === "internal").length, 2, "new user work gets its own one-shot budget");
 		await h.tool("plan_complete");
 		assert.equal(h.state().collection.attached, null);
+		const thirdParty = harness(dir, fixture());
+		await thirdParty.event("session_start", { reason: "resume" });
+		await thirdParty.prompt("Implement with the configured editor");
+		await thirdParty.event("tool_result", { toolName: "replace", input: {}, isError: false });
+		await settle(thirdParty);
+		assert.equal(thirdParty.events.filter((e) => e.kind === "internal").length, 1, "opaque successful editors arm normal Build reconciliation");
+		await thirdParty.event("session_shutdown");
 		for (const skip of ["conversation", "aborted", "error", "tool-error", "pending", "plan", "step", "complete", "blocked"]) {
 			const f = fixture() as any[];
 			if (skip === "step") f[0].data.execution = createPlanExecution(markdown);
@@ -1138,8 +1145,8 @@ test("validation chat notice keeps instructions out of enabled plan titles acros
 		assert.equal(status(), "Saved heading");
 		assert.equal(fs.readFileSync(file, "utf8"), "# Saved heading\n");
 		fs.writeFileSync(file, "No heading\n");
-		await h.event("tool_result", { toolName: "edit", input: { path: file }, isError: false });
-		assert.equal(status(), "Untitled task");
+		await h.event("tool_result", { toolName: "undo_last_change", input: { path: file }, isError: false });
+		assert.equal(status(), "Untitled task", "path-bearing third-party results refresh the plan title");
 		await h.command("");
 		await h.tool("plan_task", { action: "update", sequence: 1, title: "Fix redirects", scope: "Fix login" });
 		await h.build();
@@ -1762,7 +1769,78 @@ test("RPC approval carries the complete review in its blocking request without c
 	}
 });
 
-test("paused active steps block both shells and edits until explicit resume; stale revisions preserve bytes", async () => {
+test("live host tool choices survive mode refreshes without restoring built-in editors", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-host-tools-"));
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	try {
+		const entries = [{ type: "custom", customType: "pi-plan-build-state", data: {
+			version: STATE_VERSION,
+			selectedMode: "plan",
+			toolsBeforeModes: ["read", "write", "edit", "bash", "grep"],
+			collection: { records: [], attached: null, counter: 0 },
+		} }];
+		const hostTools = ["read", "write", "bash", "replace", "insert", "anchor_grep", "undo_last_change"];
+		const h = harness(dir, entries, "session", hostTools);
+		await h.event("session_start", { reason: "resume" });
+		assert.ok(!h.active().includes("edit"), "Plan Build must not restore an editor removed by the host");
+		assert.ok(!h.active().includes("grep"), "a stale persisted tool snapshot must not override the live host set");
+		for (const name of hostTools) assert.ok(h.active().includes(name), `${name} remains active`);
+		h.setActive(h.active().filter((name) => name !== "anchor_grep"));
+		await h.event("session_compact");
+		assert.ok(!h.active().includes("anchor_grep"), "later host removals survive applyTools");
+		await h.build();
+		assert.ok(!h.active().includes("edit"));
+		assert.ok(!h.active().includes("grep"));
+		assert.ok(!h.active().includes("anchor_grep"));
+		for (const name of ["replace", "insert", "undo_last_change"]) assert.ok(h.active().includes(name));
+		await h.event("session_shutdown");
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("third-party editors share Plan, Build-path, transition-batch, and unavailable-state guards", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-third-party-guards-"));
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	try {
+		fs.mkdirSync(path.join(dir, "plans"));
+		const file = makePlanPath(path.join(dir, "plans"), "session", 1);
+		fs.writeFileSync(file, "# Guarded plan\n");
+		const data = { version: STATE_VERSION, selectedMode: "plan", collection: { records: [{ plan: { sequence: 1, status: "open" } }], attached: 1, counter: 1 } };
+		const h = harness(dir, [{ type: "custom", customType: "pi-plan-build-state", data }], "session", ["read", "write", "bash", "replace", "insert", "undo_last_change"]);
+		await h.event("session_start", { reason: "resume" });
+		for (const toolName of ["replace", "insert"]) {
+			const opaque = await h.event("tool_call", { toolName, input: {} });
+			assert.equal(opaque.block, true);
+			assert.match(opaque.reason, /cannot verify the target/);
+			assert.equal(await h.event("tool_call", { toolName, input: { path: file } }), undefined);
+		}
+		assert.equal(await h.event("tool_call", { toolName: "undo_last_change", input: { path: file } }), undefined);
+		assert.equal((await h.event("tool_call", { toolName: "undo_last_change", input: { path: path.join(dir, "project.ts") } })).block, true);
+
+		await h.build();
+		for (const toolName of ["replace", "insert", "undo_last_change"]) {
+			assert.equal((await h.event("tool_call", { toolName, input: { path: file } })).block, true, `${toolName} cannot change tracked plans in Build`);
+		}
+		assert.equal(await h.event("tool_call", { toolName: "replace", input: {} }), undefined, "opaque editors remain usable for ordinary Build work");
+		h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "plan_task", arguments: { action: "update" } }] } });
+		assert.match((await h.event("tool_call", { toolName: "insert", input: {} })).reason, /separate tool batch/);
+		await h.event("session_shutdown");
+
+		const broken = harness(dir, [{ type: "custom", customType: "pi-plan-build-state", data: { version: STATE_VERSION, selectedMode: "build", collection: "invalid" } }]);
+		await broken.event("session_start", { reason: "resume" });
+		for (const toolName of ["replace", "insert", "undo_last_change"]) {
+			assert.match((await broken.event("tool_call", { toolName, input: {} })).reason, /Plan state unavailable/);
+		}
+		await broken.event("session_shutdown");
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("paused active steps block both shells and recognized editors until explicit resume; stale revisions preserve bytes", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-paused-"));
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	try {
@@ -1780,9 +1858,10 @@ test("paused active steps block both shells and edits until explicit resume; sta
 		const operational = context.find((m: any) => m.customType === "pi-plan-build-task");
 		assert.match(operational.content, /execution is paused/);
 		assert.doesNotMatch(operational.content, /Implement only step|Build mode permits/);
-		for (const toolName of ["edit", "write", "bash", "powershell"]) {
+		for (const toolName of ["edit", "write", "replace", "insert", "undo_last_change", "bash", "powershell"]) {
 			assert.equal((await h.event("tool_call", { toolName, input: { path: path.join(dir, "project.ts"), command: "echo test" } })).block, true);
 		}
+		assert.equal((await h.event("tool_call", { toolName: "replace", input: {} })).block, true, "opaque editors cannot bypass the waiting gate");
 		await assert.rejects(h.tool("plan_step_complete", { summary: "Not eligible" }), /No plan step/);
 		await h.callTool("plan_step_control", { action: "resume" });
 		assert.ok(h.active().includes("plan_step_complete"));
