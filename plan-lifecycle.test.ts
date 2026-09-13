@@ -1813,25 +1813,29 @@ test("third-party editors share Plan, Build-path, transition-batch, and unavaila
 		for (const toolName of ["replace", "insert"]) {
 			const opaque = await h.event("tool_call", { toolName, input: {} });
 			assert.equal(opaque.block, true);
-			assert.match(opaque.reason, /cannot verify the target/);
+			assert.equal(opaque.reason, `Agent action blocked: ${toolName} has no verifiable target; Plan mode permits only ${file}.`);
 			assert.equal(await h.event("tool_call", { toolName, input: { path: file } }), undefined);
 		}
 		assert.equal(await h.event("tool_call", { toolName: "undo_last_change", input: { path: file } }), undefined);
-		assert.equal((await h.event("tool_call", { toolName: "undo_last_change", input: { path: path.join(dir, "project.ts") } })).block, true);
+		const wrongPath = await h.event("tool_call", { toolName: "undo_last_change", input: { path: path.join(dir, "project.ts") } });
+		assert.equal(wrongPath.block, true);
+		assert.equal(wrongPath.reason, `Agent action blocked: Plan mode permits file mutations only to ${file}.`);
 
 		await h.build();
 		for (const toolName of ["replace", "insert", "undo_last_change"]) {
-			assert.equal((await h.event("tool_call", { toolName, input: { path: file } })).block, true, `${toolName} cannot change tracked plans in Build`);
+			const guarded = await h.event("tool_call", { toolName, input: { path: file } });
+			assert.equal(guarded.block, true, `${toolName} cannot change tracked plans in Build`);
+			assert.equal(guarded.reason, "Agent action blocked: tracked plan files are read-only in Build mode; use plan_step_complete or plan_complete instead.");
 		}
 		assert.equal(await h.event("tool_call", { toolName: "replace", input: {} }), undefined, "opaque editors remain usable for ordinary Build work");
 		h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "plan_task", arguments: { action: "update" } }] } });
-		assert.match((await h.event("tool_call", { toolName: "insert", input: {} })).reason, /separate tool batch/);
+		assert.equal((await h.event("tool_call", { toolName: "insert", input: {} })).reason, "Agent action blocked: plan_task must finish before dependent actions.");
 		await h.event("session_shutdown");
 
 		const broken = harness(dir, [{ type: "custom", customType: "pi-plan-build-state", data: { version: STATE_VERSION, selectedMode: "build", collection: "invalid" } }]);
 		await broken.event("session_start", { reason: "resume" });
 		for (const toolName of ["replace", "insert", "undo_last_change"]) {
-			assert.match((await broken.event("tool_call", { toolName, input: {} })).reason, /Plan state unavailable/);
+			assert.match((await broken.event("tool_call", { toolName, input: {} })).reason, /^Agent action blocked: plan state is unavailable \(.+\)\.$/);
 		}
 		await broken.event("session_shutdown");
 	} finally {
@@ -1859,9 +1863,13 @@ test("paused active steps block both shells and recognized editors until explici
 		assert.match(operational.content, /execution is paused/);
 		assert.doesNotMatch(operational.content, /Implement only step|Build mode permits/);
 		for (const toolName of ["edit", "write", "replace", "insert", "undo_last_change", "bash", "powershell"]) {
-			assert.equal((await h.event("tool_call", { toolName, input: { path: path.join(dir, "project.ts"), command: "echo test" } })).block, true);
+			const guarded = await h.event("tool_call", { toolName, input: { path: path.join(dir, "project.ts"), command: "echo test" } });
+			assert.equal(guarded.block, true);
+			assert.equal(guarded.reason, "Agent action blocked: implementation is waiting for your instruction.");
 		}
-		assert.equal((await h.event("tool_call", { toolName: "replace", input: {} })).block, true, "opaque editors cannot bypass the waiting gate");
+		const opaque = await h.event("tool_call", { toolName: "replace", input: {} });
+		assert.equal(opaque.block, true, "opaque editors cannot bypass the waiting gate");
+		assert.equal(opaque.reason, "Agent action blocked: implementation is waiting for your instruction.");
 		await assert.rejects(h.tool("plan_step_complete", { summary: "Not eligible" }), /No plan step/);
 		await h.callTool("plan_step_control", { action: "resume" });
 		assert.ok(h.active().includes("plan_step_complete"));

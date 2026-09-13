@@ -1072,11 +1072,11 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const effectiveMode = runMode ?? selectedMode;
-		if (plans.error && (MANAGED_TOOLS.has(event.toolName) && event.toolName !== "question" || isProjectMutationTool(event.toolName))) return { block: true, reason: `Plan state unavailable: ${plans.error}. Restore usable state before mutations.` };
+		if (plans.error && (MANAGED_TOOLS.has(event.toolName) && event.toolName !== "question" || isProjectMutationTool(event.toolName))) return { block: true, reason: `Agent action blocked: plan state is unavailable (${plans.error}).` };
 		if (isProjectMutationTool(event.toolName) || DEPENDENT_PLAN_TOOLS.has(event.toolName)) {
 			const latestAssistant = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant");
 			if (latestAssistant?.type === "message" && latestAssistant.message.role === "assistant" && latestAssistant.message.content.some((part) => part.type === "toolCall" && part.name === "plan_task" && !["list", "pause", "resume"].includes((part.arguments as { action?: string })?.action ?? ""))) {
-				return { block: true, reason: "Await plan_task in a separate tool batch before dependent edits, shell commands, or execution actions." };
+				return { block: true, reason: "Agent action blocked: plan_task must finish before dependent actions." };
 			}
 		}
 		if (effectiveMode === "build" && isFileMutationTool(event.toolName)) {
@@ -1084,14 +1084,14 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 			if (inputPath !== undefined && (isAllowedPlanMutation(ctx.cwd, inputPath, currentPlanPath()) || plans.collection.records.some((r) => isAllowedPlanMutation(ctx.cwd, inputPath, planPathFor(r.plan.sequence, ctx))))) {
 				return {
 					block: true,
-					reason: "Current and historical plan files are read-only in Build mode. Do not add completion markers or otherwise update their steps; report completion through plan_step_complete during step execution or plan_complete after normal implementation and verification.",
+					reason: "Agent action blocked: tracked plan files are read-only in Build mode; use plan_step_complete or plan_complete instead.",
 				};
 			}
 		}
 		if (effectiveMode === "build" && plans.execution && plans.execution.status !== "completed" && !executablePlanStep(plans.execution) && isProjectMutationTool(event.toolName)) {
 			return {
 				block: true,
-				reason: "Step-by-step execution is waiting for an explicit natural-language instruction from the user; no step is approved for project mutations.",
+				reason: "Agent action blocked: implementation is waiting for your instruction.",
 			};
 		}
 		if (effectiveMode !== "plan" || !isFileMutationTool(event.toolName)) return;
@@ -1100,8 +1100,8 @@ export default function planBuildModes(pi: ExtensionAPI): void {
 		return {
 			block: true,
 			reason: inputPath === undefined
-				? `Plan mode cannot verify the target of ${event.toolName}; use a path-bearing editor for the plan file: ${currentPlanPath()}`
-				: `Plan mode only permits file-mutation access to the plan file: ${currentPlanPath()}`,
+				? `Agent action blocked: ${event.toolName} has no verifiable target; Plan mode permits only ${currentPlanPath()}.`
+				: `Agent action blocked: Plan mode permits file mutations only to ${currentPlanPath()}.`,
 		};
 	});
 
