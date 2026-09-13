@@ -11,7 +11,7 @@ const OptionSchema = Type.Object({
 
 const PromptSchema = Type.Object({
 	question: Type.String({ description: "The question to ask" }),
-	header: Type.String({ description: "Short header (12 characters or fewer)", maxLength: 12 }),
+	header: Type.String({ description: "Short header; prefer 12 characters or fewer" }),
 	options: Type.Array(OptionSchema, { minItems: 2, maxItems: 4 }),
 	multiple: Type.Optional(Type.Boolean({ description: "Allow more than one selection" })),
 	custom: Type.Optional(Type.Boolean({ description: "Allow a custom answer; defaults to true" })),

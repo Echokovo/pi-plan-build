@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerQuestionTool } from "./question-ui.ts";
+import { Check } from "typebox/value";
+import { QuestionParameters, registerQuestionTool } from "./question-ui.ts";
 
 const prompt = (question: string, overrides: Record<string, unknown> = {}) => ({
 	question,
@@ -43,6 +44,14 @@ function makeContext(select: (title: string, options: string[], opts?: { signal?
 		},
 	};
 }
+
+test("question header length is advisory while its type remains enforced", () => {
+	const params = { questions: [prompt("Continue?", { header: "Current sword behavior" })] };
+	assert.equal(Check(QuestionParameters, params), true);
+	assert.equal(Check(QuestionParameters, {
+		questions: [prompt("Continue?", { header: 42 })],
+	}), false);
+});
 
 test("question output preserves answers without coaching and distinguishes rendering states", async () => {
 	const { tool } = getQuestionTool();
